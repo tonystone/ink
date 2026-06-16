@@ -261,16 +261,32 @@ const createIncremental = (
 
 		buffer.push(returnPrefix);
 
-		// Clear extra lines if the current content's line count is lower than the previous.
+		// Position the cursor at row 0 of the previous output area so the
+		// diff loop's i-th iteration aligns with row i. When the previous
+		// output ends with '\n' the cursor sits one row below the last
+		// visible content (on the empty row that the trailing newline
+		// produced), so it must come up by `previousVisible` rows; with no
+		// trailing newline it sits on the last visible content row, so it
+		// must come up by `previousVisible - 1` rows. The shrink branch
+		// already accounts for this via `extraSlot` on `eraseLines`; the
+		// grow/same branch had been using `previousVisible - 1`
+		// unconditionally, which left the diff loop writing one row too
+		// low and corrupting the rendered region whenever the output had
+		// a trailing newline.
+		const previousHadTrailingNewline = previousOutput.endsWith('\n');
 		if (visibleCount < previousVisible) {
-			const previousHadTrailingNewline = previousOutput.endsWith('\n');
 			const extraSlot = previousHadTrailingNewline ? 1 : 0;
 			buffer.push(
 				ansiEscapes.eraseLines(previousVisible - visibleCount + extraSlot),
 				ansiEscapes.cursorUp(visibleCount),
 			);
 		} else {
-			buffer.push(ansiEscapes.cursorUp(previousVisible - 1));
+			const upCount = previousHadTrailingNewline
+				? previousVisible
+				: previousVisible - 1;
+			if (upCount > 0) {
+				buffer.push(ansiEscapes.cursorUp(upCount));
+			}
 		}
 
 		for (let i = 0; i < visibleCount; i++) {

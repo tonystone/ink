@@ -74,6 +74,70 @@ test('incremental rendering - surgical updates', t => {
 	t.true(secondCall.includes('Updated')); // Only updates changed line
 	t.false(secondCall.includes('Line 1')); // Doesn't rewrite unchanged
 	t.false(secondCall.includes('Line 3')); // Doesn't rewrite unchanged
+	// The cursor must come up by `previousVisible` rows when the previous
+	// output ended with a trailing newline so the diff loop lands at row 0.
+	// Previously the grow/same branch used `previousVisible - 1`, which
+	// caused every line to be written one row below its intended position,
+	// leaving the top row stale and shifting all subsequent rows down by 1.
+	t.true(secondCall.includes(ansiEscapes.cursorUp(3)));
+});
+
+test('incremental rendering - first-line change with trailing newline lands at row 0', t => {
+	const stdout = createStdout();
+	const render = logUpdate.create(stdout, {
+		showCursor: true,
+		incremental: true,
+	});
+
+	render('Line 1\nLine 2\nLine 3\n');
+	render('Updated\nLine 2\nLine 3\n');
+
+	const secondCall = (stdout.write as any).secondCall.args[0] as string;
+	// Without the trailing-newline-aware cursorUp, the renderer would push
+	// `cursorUp(2)` and then `cursorNextLine` would land at row 2 (because
+	// the cursor sat at the empty row after row 2 from the trailing \n),
+	// writing 'Updated' at row 1 and leaving 'Line 1' stale at row 0.
+	t.true(secondCall.includes(ansiEscapes.cursorUp(3)));
+	t.true(secondCall.includes('Updated'));
+});
+
+test('incremental rendering - grow with trailing newline writes new lines at correct rows', t => {
+	const stdout = createStdout();
+	const render = logUpdate.create(stdout, {
+		showCursor: true,
+		incremental: true,
+	});
+
+	render('Line 1\n');
+	render('Line 1\nLine 2\nLine 3\n');
+
+	const secondCall = (stdout.write as any).secondCall.args[0] as string;
+	// previousVisible=1 with trailing newline puts the cursor on row 1
+	// (the empty row). Coming up by previousVisible=1 lands at row 0 so
+	// the cursorNextLine on the unchanged first line advances to row 1,
+	// where 'Line 2' is written, and 'Line 3' follows at row 2.
+	t.true(secondCall.includes(ansiEscapes.cursorUp(1)));
+	t.true(secondCall.includes('Line 2'));
+	t.true(secondCall.includes('Line 3'));
+});
+
+test('incremental rendering - no-trailing-newline surgical update preserves previousVisible - 1 step', t => {
+	const stdout = createStdout();
+	const render = logUpdate.create(stdout, {
+		showCursor: true,
+		incremental: true,
+	});
+
+	render('Line 1\nLine 2\nLine 3');
+	render('Line 1\nUpdated\nLine 3');
+
+	const secondCall = (stdout.write as any).secondCall.args[0] as string;
+	// Without trailing newline, the cursor sits on the last visible content
+	// row (row 2 here), so it must come up by previousVisible - 1 = 2 to
+	// land at row 0. This guards the grow/same branch against regressing
+	// to an unconditional `cursorUp(previousVisible)`.
+	t.true(secondCall.includes(ansiEscapes.cursorUp(2)));
+	t.true(secondCall.includes('Updated'));
 });
 
 test('incremental rendering - clears extra lines when output shrinks', t => {
