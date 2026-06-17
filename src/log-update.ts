@@ -303,10 +303,24 @@ const createIncremental = (
 				continue;
 			}
 
+			// Erase the row BEFORE writing the new content. If we instead
+			// erase after the write, the cursor is in pending-wrap state
+			// when the new content fills the terminal width (writing at the
+			// last column leaves the cursor logically at that column rather
+			// than advancing past it). On xterm-style terminals — including
+			// Terminal.app and iTerm2 — `\e[K` in pending-wrap state erases
+			// the just-written character, corrupting the rightmost cell on
+			// every redraw. Erasing first is safe in both directions: when
+			// the new content is shorter, the row clears before the new
+			// content writes (no residue); when the new content fills the
+			// width, no erase happens at the right edge so the last column
+			// survives. The two operations are streamed together so the
+			// terminal renders them as a single frame — there is no visible
+			// intermediate "blank row" state.
 			buffer.push(
 				ansiEscapes.cursorTo(0) +
-					nextLines[i] +
 					ansiEscapes.eraseEndLine +
+					nextLines[i] +
 					// Don't append newline after the last line when the input
 					// has no trailing newline (fullscreen mode).
 					(isLastLine && !hasTrailingNewline ? '' : '\n'),
