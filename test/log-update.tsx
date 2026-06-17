@@ -666,3 +666,137 @@ test('incremental rendering - render to empty string (full clear vs early exit)'
 	render('\n');
 	t.is((stdout.write as any).callCount, 2); // No additional write
 });
+
+// Tiny xterm-flavoured terminal simulator. Models the pending-wrap
+// behaviour: writing a character at the last column places the cursor
+// in a "logically still at last col" state where `\e[K` (erase end of
+// line) erases the character that was just written. This is the
+// behaviour real Terminal.app / iTerm2 / xterm exhibit, and is the
+// reason the incremental renderer's per-row clear must run BEFORE the
+// row content rather than after.
+class XtermLike {
+	rows: string[] = [''];
+	r = 0;
+	c = 0;
+	pendingWrap = false;
+
+	constructor(public width: number) {}
+
+	private ensureRow(): void {
+		while (this.rows.length <= this.r) this.rows.push('');
+	}
+
+	private setChar(ch: string): void {
+		if (this.pendingWrap) {
+			this.r++;
+			this.c = 0;
+			this.ensureRow();
+			this.pendingWrap = false;
+		}
+		this.ensureRow();
+		const row = this.rows[this.r] ?? '';
+		const padded =
+			row.length < this.c ? row + ' '.repeat(this.c - row.length) : row;
+		this.rows[this.r] = padded.slice(0, this.c) + ch + padded.slice(this.c + 1);
+		this.c++;
+		if (this.c >= this.width) {
+			this.pendingWrap = true;
+			this.c = this.width - 1;
+		}
+	}
+
+	private eraseEndLine(): void {
+		this.ensureRow();
+		this.rows[this.r] = (this.rows[this.r] ?? '').slice(0, this.c);
+	}
+
+	write(s: string): void {
+		let i = 0;
+		while (i < s.length) {
+			const ch = s[i] ?? '';
+			if (ch === '' && s[i + 1] === '[') {
+				let j = i + 2;
+				let params = '';
+				while (j < s.length && !/[a-zA-Z]/.test(s[j] ?? '')) {
+					params += s[j];
+					j++;
+				}
+
+				const letter = s[j];
+				const args = params.split(';').map(x => (x === '' ? undefined : Number.parseInt(x, 10)));
+				const n = args[0] ?? 1;
+				switch (letter) {
+					case 'A': {
+						this.r = Math.max(0, this.r - n);
+						this.pendingWrap = false;
+						break;
+					}
+
+					case 'E': {
+						this.r += n;
+						this.c = 0;
+						this.pendingWrap = false;
+						break;
+					}
+
+					case 'G': {
+						this.c = (args[0] ?? 1) - 1;
+						this.pendingWrap = false;
+						break;
+					}
+
+					case 'K': {
+						this.eraseEndLine();
+						break;
+					}
+
+					default: {
+						break;
+					}
+				}
+
+				i = j + 1;
+			} else if (ch === '\n') {
+				this.r++;
+				this.c = 0;
+				this.ensureRow();
+				this.pendingWrap = false;
+				i++;
+			} else {
+				this.setChar(ch);
+				i++;
+			}
+		}
+	}
+}
+
+test('incremental rendering - rightmost column survives a full-width row update', t => {
+	const stdout = createStdout();
+	const render = logUpdate.create(stdout, {showCursor: true, incremental: true});
+	const width = 12;
+	const term = new XtermLike(width);
+
+	// Render frame 1: a three-row box whose middle row fills the terminal
+	// width, with a "border" character at the last column.
+	const frame1 = '+----------+\n|  hello   |\n+----------+\n';
+	render(frame1);
+	for (const args of (stdout.write as any).args) term.write(args[0] as string);
+
+	// Render frame 2: same shape, different middle content. The last
+	// column of every row is still '|' / '+'.
+	const frame2 = '+----------+\n|  WORLD   |\n+----------+\n';
+	render(frame2);
+	for (let i = 1; i < (stdout.write as any).args.length; i++) {
+		term.write((stdout.write as any).args[i][0] as string);
+	}
+
+	// The rightmost column on every row must survive. Before the
+	// eraseEndLine-before-content fix, the per-row `\e[K` ran AFTER the
+	// row content; writing the final '|' put the cursor in pending-wrap
+	// state and the `\e[K` erased it, leaving the rightmost column blank.
+	t.is(term.rows[0]?.[width - 1], '+');
+	t.is(term.rows[1]?.[width - 1], '|');
+	t.is(term.rows[2]?.[width - 1], '+');
+	// And the middle row's content updated correctly.
+	t.true(term.rows[1]?.includes('WORLD') ?? false);
+});
